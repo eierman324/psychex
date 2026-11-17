@@ -3,12 +3,15 @@ const { invoke } = window.__TAURI__.core;
 let excList = [];
 let versions = {};
 let installed = {};
+let avdList = [];
+let sdkAvailable = false;
+let systemImageInstalled = false;
 let pollInterval = null;
 let wireTimeout = null;
 let resizeTimeout = null;
 
 const EXC_JSON_URL = 'https://raw.githubusercontent.com/e1erman/psychex/main/server/exc.json';
-const STEP_COUNT = 3;
+const STEP_COUNT = 5;
 
 function logLine(text, type) {
     const log = document.getElementById('loading-log-content');
@@ -40,68 +43,118 @@ function hideLoading() {
     setTimeout(() => el.remove(), 350);
 }
 
+function makeLabel(index, text, wrap) {
+    return { visible: true, type: "Label", index, layoutOrder: index, text, properties: { addons: [], doesWrap: wrap !== false } };
+}
+function makeButton(index, text, risky) {
+    return { visible: true, type: "Button", disabled: false, layoutOrder: index, text, index, properties: { risky: !!risky, doubleClick: false } };
+}
+function makeGroupbox(name, side, order, icon, elements) {
+    return { visible: true, type: "Groupbox", side, order, icon, name, collapsed: false, disableCollapsing: false, dependencies: [], dependencyBoxes: [], elements };
+}
+
 function buildDataJson() {
     const tabs = {};
+    const tabStructure = {};
 
+    // ── Executor tabs ──────────────────────────────────────────────────────────
     excList.forEach((exc, i) => {
         const inst = installed[exc.name];
         const latest = versions[exc.name];
+        const excVms = avdList.filter(a => a.exc_name === exc.name);
 
         const leftElements = [
-            { visible: true, type: "Label", index: 1, layoutOrder: 1, text: `Installed: ${inst || "—"}`, properties: { addons: [], doesWrap: false } },
-            { visible: true, type: "Label", index: 2, layoutOrder: 2, text: `Latest: ${latest || "unavailable"}`, properties: { addons: [], doesWrap: false } },
+            makeLabel(1, `OS Image: ${systemImageInstalled ? '✓ Downloaded' : '✗ Not downloaded'}`),
+            makeLabel(2, `VMs: ${excVms.length} created`),
+            makeLabel(3, `Installed APK: ${inst || '—'}`),
+            makeLabel(4, `Latest APK: ${latest || 'unavailable'}`),
         ];
 
         const rightElements = [];
-        if (!inst) {
-            rightElements.push({ visible: true, type: "Button", disabled: false, layoutOrder: 1, text: "Download", index: 1, properties: { risky: false, doubleClick: false } });
-        } else if (inst !== latest && latest) {
-            rightElements.push({ visible: true, type: "Button", disabled: false, layoutOrder: 1, text: "Update", index: 1, properties: { risky: false, doubleClick: false } });
-            rightElements.push({ visible: true, type: "Label", index: 2, layoutOrder: 2, text: `Current: ${inst}`, properties: { addons: [], doesWrap: true } });
+        let ri = 1;
+
+        if (!sdkAvailable) {
+            rightElements.push(makeLabel(ri++, 'Android Studio required'));
+        } else if (!systemImageInstalled) {
+            rightElements.push(makeButton(ri++, 'Download Image'));
         } else {
-            rightElements.push({ visible: true, type: "Label", index: 1, layoutOrder: 1, text: "Up to date ✓", properties: { addons: [], doesWrap: false } });
+            rightElements.push(makeButton(ri++, 'Create VM'));
+        }
+
+        if (!inst) {
+            rightElements.push(makeButton(ri++, 'Download APK'));
+        } else if (inst !== latest && latest) {
+            rightElements.push(makeButton(ri++, 'Update APK'));
+            rightElements.push(makeLabel(ri++, `Current: ${inst}`, true));
+        } else {
+            rightElements.push(makeLabel(ri++, 'APK up to date ✓'));
         }
 
         tabs[exc.name] = {
-            type: "MainTab",
-            name: exc.name,
-            description: "exc downloader",
-            order: i + 1,
-            icon: "DownloadIcon",
-            isKeyTab: false,
-            dependencyGroupboxes: [],
-            elements: [],
+            type: "MainTab", name: exc.name, description: "executor",
+            order: i + 1, icon: "DownloadIcon", isKeyTab: false,
+            dependencyGroupboxes: [], elements: [],
             tabboxes: { Right: [], Left: [], Unknown: [] },
             warningBox: { Visible: false, Title: "", IsNormal: true, Text: "", LockSize: false },
             groupboxes: {
-                Left: {
-                    Status: {
-                        visible: true, type: "Groupbox", side: "Left", order: 1, icon: "InfoIcon",
-                        name: "Status", collapsed: false, disableCollapsing: false,
-                        dependencies: [], dependencyBoxes: [], elements: leftElements
-                    }
-                },
-                Right: {
-                    Actions: {
-                        visible: true, type: "Groupbox", side: "Right", order: 1, icon: "DownloadIcon",
-                        name: "Actions", collapsed: false, disableCollapsing: false,
-                        dependencies: [], dependencyBoxes: [], elements: rightElements
-                    }
-                },
+                Left: { Status: makeGroupbox("Status", "Left", 1, "InfoIcon", leftElements) },
+                Right: { Actions: makeGroupbox("Actions", "Right", 1, "DownloadIcon", rightElements) },
                 Unknown: []
             }
         };
-    });
 
-    const tabStructure = {};
-    excList.forEach(exc => {
         tabStructure[exc.name] = {
             tabboxes: { Right: [], Left: [], Unknown: [] },
-            isKeyTab: false,
-            elementCount: 2,
+            isKeyTab: false, elementCount: rightElements.length + leftElements.length,
             groupboxes: { Right: ["Actions"], Left: ["Status"], Unknown: [] }
         };
     });
+
+    // ── VMs tab ────────────────────────────────────────────────────────────────
+    const vmLeftGroupboxes = {};
+    const vmLeftNames = [];
+
+    const vmRightGroupboxes = {};
+    const vmRightNames = [];
+
+    if (avdList.length === 0) {
+        vmLeftGroupboxes["vmstatus"] = makeGroupbox("Status", "Left", 1, "InfoIcon", [
+            makeLabel(1, sdkAvailable ? 'No VMs created yet.' : 'Android Studio not found.'),
+            makeLabel(2, sdkAvailable && systemImageInstalled ? 'Create a VM from the executor tab.' : ''),
+        ]);
+        vmLeftNames.push("vmstatus");
+    } else {
+        avdList.forEach((avd, i) => {
+            const key = `avd_${i}`;
+            vmLeftGroupboxes[key] = makeGroupbox(avd.display_name, "Left", i + 1, "MonitorIcon", [
+                makeLabel(1, `Executor: ${avd.exc_name}`),
+                makeLabel(2, `Target: ${avd.target || 'Android 35'}`),
+            ]);
+            vmLeftNames.push(key);
+
+            const rkey = `avdact_${i}`;
+            vmRightGroupboxes[rkey] = makeGroupbox(avd.display_name, "Right", i + 1, "MonitorIcon", [
+                makeButton(1, 'Start'),
+                makeButton(2, 'Delete', true),
+            ]);
+            vmRightNames.push(rkey);
+        });
+    }
+
+    tabs["VMs"] = {
+        type: "MainTab", name: "VMs", description: "virtual machines",
+        order: excList.length + 1, icon: "MonitorIcon", isKeyTab: false,
+        dependencyGroupboxes: [], elements: [],
+        tabboxes: { Right: [], Left: [], Unknown: [] },
+        warningBox: { Visible: false, Title: "", IsNormal: true, Text: "", LockSize: false },
+        groupboxes: { Left: vmLeftGroupboxes, Right: vmRightGroupboxes, Unknown: [] }
+    };
+
+    tabStructure["VMs"] = {
+        tabboxes: { Right: [], Left: [], Unknown: [] },
+        isKeyTab: false, elementCount: avdList.length,
+        groupboxes: { Left: vmLeftNames, Right: vmRightNames, Unknown: [] }
+    };
 
     return {
         structure: { tabStructure },
@@ -158,7 +211,7 @@ function collapseLog() {
 
 document.getElementById('loading-log').addEventListener('click', (e) => {
     e.stopPropagation();
-    excList = []; versions = {}; installed = {};
+    excList = []; versions = {}; installed = {}; avdList = []; sdkAvailable = false; systemImageInstalled = false;
     const log = document.getElementById('loading-log');
     collapseLog();
     document.getElementById('loading-log-content').innerHTML = '';
@@ -184,17 +237,72 @@ function wireButtons() {
     const widget = document.querySelector('obsidian-widget');
     if (!widget) return;
 
-    // Download/Update button clicks
-    widget.addEventListener('click', (e) => {
+    // Button clicks
+    widget.addEventListener('click', async (e) => {
         const btn = e.target.closest('button');
         if (!btn) return;
         const text = btn.textContent.trim();
         const activeTab = widget.querySelector('[role="tab"][aria-selected="true"]');
         const tabName = activeTab?.textContent?.trim();
-        const exc = excList.find(e => e.name === tabName);
-        if (!exc) return;
-        if (text === 'Download' || text === 'Update') {
-            startDownload(exc.name);
+        const exc = excList.find(ex => ex.name === tabName);
+
+        // Executor tab actions
+        if (exc) {
+            if (text === 'Download APK' || text === 'Update APK') {
+                startDownload(exc.name);
+            } else if (text === 'Download Image') {
+                btn.disabled = true;
+                btn.textContent = 'Downloading...';
+                try {
+                    await invoke('download_system_image');
+                    systemImageInstalled = true;
+                    renderObsidian(buildDataJson());
+                } catch (err) {
+                    alert('Download failed: ' + err);
+                    btn.disabled = false;
+                    btn.textContent = 'Download Image';
+                }
+            } else if (text === 'Create VM') {
+                const name = window.prompt('VM name:');
+                if (!name || !name.trim()) return;
+                const ramStr = window.prompt('RAM (MB):', '2048');
+                const ram = parseInt(ramStr) || 2048;
+                const storageStr = window.prompt('Storage (MB):', '8192');
+                const storage = parseInt(storageStr) || 8192;
+                try {
+                    await invoke('create_avd', { name: name.trim(), excName: exc.name, ram, storage });
+                    avdList = await invoke('list_avds');
+                    renderObsidian(buildDataJson());
+                } catch (err) {
+                    alert('Create VM failed: ' + err);
+                }
+            }
+        }
+
+        // VMs tab actions
+        if (tabName === 'VMs' && (text === 'Start' || text === 'Delete')) {
+            // Match by groupbox title (display_name)
+            const groupbox = btn.closest('[class*="group"], section, fieldset, div[class]');
+            const titleEl = groupbox?.querySelector('p, span, label, div');
+            const displayName = groupbox?.querySelector('[class*="title"], [class*="name"], [class*="header"]')?.textContent?.trim()
+                || titleEl?.closest('[class]')?.previousElementSibling?.textContent?.trim();
+            // Fallback: find by button position in avdList
+            const allBtns = [...widget.querySelectorAll('button')].filter(b => b.textContent.trim() === text);
+            const btnIndex = allBtns.indexOf(btn);
+            const avd = avdList[Math.floor(btnIndex)];
+            if (!avd) return;
+
+            if (text === 'Start') {
+                try { await invoke('start_avd', { name: avd.name }); }
+                catch (err) { alert('Start failed: ' + err); }
+            } else if (text === 'Delete') {
+                if (!confirm(`Delete VM "${avd.display_name}"?`)) return;
+                try {
+                    await invoke('delete_avd', { name: avd.name });
+                    avdList = await invoke('list_avds');
+                    renderObsidian(buildDataJson());
+                } catch (err) { alert('Delete failed: ' + err); }
+            }
         }
     }, true);
 
@@ -339,7 +447,33 @@ async function init() {
     }));
 
     await new Promise(r => setTimeout(r, 500));
-    loadingStep(3, 'Done!', 'Click anywhere to continue');
+    loadingStep(3, 'Checking Android SDK...', 'Looking for Android Studio');
+    logLine('Checking Android SDK...');
+    try {
+        const sdkPath = await invoke('check_android_sdk');
+        sdkAvailable = true;
+        logLine('✓ SDK: ' + sdkPath, 'ok');
+    } catch {
+        sdkAvailable = false;
+        logLine('· Android SDK not found', 'dim');
+    }
+
+    systemImageInstalled = await invoke('check_system_image');
+    logLine(systemImageInstalled ? '✓ System image ready' : '· System image not downloaded', systemImageInstalled ? 'ok' : 'dim');
+
+    await new Promise(r => setTimeout(r, 500));
+    loadingStep(4, 'Loading VMs...', 'Reading AVD list');
+    logLine('Loading VMs...');
+    try {
+        avdList = await invoke('list_avds');
+        logLine('✓ ' + avdList.length + ' VM(s) found', 'ok');
+    } catch {
+        avdList = [];
+        logLine('· Could not read VMs', 'dim');
+    }
+
+    await new Promise(r => setTimeout(r, 500));
+    loadingStep(5, 'Done!', 'Click anywhere to continue');
     logLine('Ready.', 'ok');
     const card = document.getElementById('loading-card');
     card.style.cursor = 'pointer';
